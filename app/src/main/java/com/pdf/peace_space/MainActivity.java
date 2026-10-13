@@ -6,12 +6,14 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.ext.SdkExtensions;
 import android.util.Log;
+import android.view.View;
 import android.view.WindowManager;
 import android.widget.Toast;
 
 import androidx.activity.result.ActivityResultLauncher;
 import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.annotation.NonNull;
+import androidx.annotation.RequiresExtension;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.graphics.Insets;
 import androidx.core.view.ViewCompat;
@@ -30,6 +32,8 @@ public class MainActivity extends AppCompatActivity {
     private static final String PDF_VIEWER_FRAGMENT_TAG = "pdf_viewer_fragment_tag";
 
     private PdfViewerFragment pdfViewerFragment;
+    private MaterialButton getContentButton;
+    private MaterialButton searchButton;
 
     private final ActivityResultLauncher<String[]> filePicker =
             registerForActivityResult(new ActivityResultContracts.OpenDocument(), uri -> {
@@ -77,10 +81,11 @@ public class MainActivity extends AppCompatActivity {
         if (isSdkExtensionSupported()) {
             pdfViewerFragment = (PdfViewerFragment) getSupportFragmentManager()
                     .findFragmentByTag(PDF_VIEWER_FRAGMENT_TAG);
+            attachPdfEventListener();
         }
 
-        MaterialButton getContentButton = findViewById(R.id.launch_button);
-        MaterialButton searchButton = findViewById(R.id.search_button);
+        getContentButton = findViewById(R.id.launch_button);
+        searchButton = findViewById(R.id.search_button);
 
         getContentButton.setOnClickListener(v -> filePicker.launch(new String[]{MIME_TYPE_PDF}));
 
@@ -138,7 +143,10 @@ public class MainActivity extends AppCompatActivity {
         if (pdfViewerFragment == null && isSdkExtensionSupported()) {
             FragmentManager fragmentManager = getSupportFragmentManager();
 
-            pdfViewerFragment = new PdfViewerFragmentExtended();
+            PdfViewerFragmentExtended extendedFragment = new PdfViewerFragmentExtended();
+            pdfViewerFragment = extendedFragment;
+            attachPdfEventListener();
+
             FragmentTransaction transaction = fragmentManager.beginTransaction();
 
             transaction.replace(
@@ -148,6 +156,33 @@ public class MainActivity extends AppCompatActivity {
             );
             transaction.commitAllowingStateLoss();
             fragmentManager.executePendingTransactions();
+        }
+    }
+
+    @RequiresExtension(extension = Build.VERSION_CODES.S, version = 13)
+    private void attachPdfEventListener() {
+        if (pdfViewerFragment instanceof PdfViewerFragmentExtended) {
+            ((PdfViewerFragmentExtended) pdfViewerFragment).setOnPdfEventListener(new PdfViewerFragmentExtended.OnPdfEventListener() {
+                @Override
+                public void onDocumentLoaded() {
+                    setBottomControlsVisible(false);
+                }
+
+                @Override
+                public void onImmersiveModeRequested(boolean enterImmersive) {
+                    setBottomControlsVisible(!enterImmersive);
+                }
+            });
+        }
+    }
+
+    private void setBottomControlsVisible(boolean visible) {
+        int visibility = visible ? View.VISIBLE : View.GONE;
+        if (getContentButton != null) {
+            getContentButton.setVisibility(visibility);
+        }
+        if (searchButton != null) {
+            searchButton.setVisibility(visibility);
         }
     }
 }
