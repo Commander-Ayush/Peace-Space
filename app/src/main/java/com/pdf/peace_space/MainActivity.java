@@ -1,21 +1,19 @@
 package com.pdf.peace_space;
 
-import android.content.ClipData;
-import android.content.ClipboardManager;
-import android.content.Context;
 import android.content.Intent;
-import android.graphics.Rect;
+import android.database.Cursor;
+import android.provider.OpenableColumns;
+import android.widget.LinearLayout;
+import android.widget.ScrollView;
+import androidx.activity.OnBackPressedCallback;
+import com.google.android.material.card.MaterialCardView;
+import com.google.android.material.materialswitch.MaterialSwitch;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Environment;
-import android.os.Handler;
-import android.os.Looper;
 import android.os.ext.SdkExtensions;
 import android.util.Log;
-import android.view.ActionMode;
-import android.view.Menu;
-import android.view.MenuItem;
 import android.view.View;
 import android.view.WindowManager;
 import android.widget.TextView;
@@ -24,7 +22,6 @@ import android.widget.Toast;
 import androidx.activity.result.ActivityResultLauncher;
 import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.annotation.NonNull;
-import androidx.annotation.Nullable;
 import androidx.annotation.RequiresExtension;
 import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.app.AppCompatActivity;
@@ -37,7 +34,7 @@ import androidx.fragment.app.FragmentTransaction;
 import androidx.pdf.viewer.fragment.PdfViewerFragment;
 
 import com.google.android.material.dialog.MaterialAlertDialogBuilder;
-import com.google.android.material.button.MaterialButton;
+import androidx.appcompat.widget.AppCompatImageButton;
 import com.google.android.material.progressindicator.LinearProgressIndicator;
 
 import java.io.File;
@@ -51,29 +48,17 @@ public class MainActivity extends AppCompatActivity {
     public static final String DEFAULT_MODEL_URL = "https://huggingface.co/litert-community/Gemma3-1B-IT/resolve/main/gemma3-1b-it-int4.task";
 
     private PdfViewerFragment pdfViewerFragment;
-    private MaterialButton getContentButton;
-    private MaterialButton searchButton;
+    private AppCompatImageButton getContentButton;
+    private AppCompatImageButton searchButton;
+    private ReadingStore readingStore;
+    private String currentDocumentUri;
+    private boolean showingDocument;
+    private int homeLoadId;
 
     private final ActivityResultLauncher<String[]> filePicker =
             registerForActivityResult(new ActivityResultContracts.OpenDocument(), uri -> {
                 if (uri != null) {
-                    Log.d(TAG, "File selected via picker: " + uri);
-                    try {
-                        getContentResolver().takePersistableUriPermission(
-                                uri,
-                                Intent.FLAG_GRANT_READ_URI_PERMISSION
-                        );
-                    } catch (Exception e) {
-                        Log.w(TAG, "Failed to take persistable URI permission", e);
-                    }
-                    if (isSdkExtensionSupported()) {
-                        initializePdfViewerFragment();
-                        if (pdfViewerFragment != null) {
-                            pdfViewerFragment.setDocumentUri(uri);
-                        }
-                    } else {
-                        Toast.makeText(this, "Device does not meet SDK extension requirements for PDF Viewer.", Toast.LENGTH_LONG).show();
-                    }
+                    openDocument(uri);
                 }
             });
 
@@ -81,6 +66,11 @@ public class MainActivity extends AppCompatActivity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
+        readingStore = ReadingStore.get(this);
+        if (savedInstanceState != null) {
+            currentDocumentUri = savedInstanceState.getString("current_document_uri");
+            showingDocument = savedInstanceState.getBoolean("showing_document");
+        }
 
         WindowCompat.setDecorFitsSystemWindows(getWindow(), false);
 
@@ -115,7 +105,21 @@ public class MainActivity extends AppCompatActivity {
             }
         });
 
-        handleIncomingIntent(getIntent());
+        findViewById(R.id.history_button).setOnClickListener(v -> showWordHistory());
+        findViewById(R.id.home_button).setOnClickListener(v -> showHome());
+        for (int id : new int[]{R.id.home_button, R.id.launch_button, R.id.search_button, R.id.history_button}) {
+            View control = findViewById(id);
+            androidx.appcompat.widget.TooltipCompat.setTooltipText(control, control.getContentDescription());
+        }
+        getOnBackPressedDispatcher().addCallback(this, new OnBackPressedCallback(true) {
+            @Override public void handleOnBackPressed() {
+                if (showingDocument) showHome();
+                else { setEnabled(false); getOnBackPressedDispatcher().onBackPressed(); }
+            }
+        });
+        updatePageVisibility();
+        refreshRecentDocuments();
+        if (savedInstanceState == null) handleIncomingIntent(getIntent());
         checkAndInitializeLlmModel();
     }
 
@@ -124,86 +128,6 @@ public class MainActivity extends AppCompatActivity {
         super.onNewIntent(intent);
         setIntent(intent);
         handleIncomingIntent(intent);
-    }
-
-    private void ensureMeaningMenuItem(Menu menu) {
-        if (menu != null && menu.findItem(R.id.action_meaning) == null) {
-            menu.add(Menu.NONE, R.id.action_meaning, 0, "Meaning")
-                    .setShowAsAction(MenuItem.SHOW_AS_ACTION_ALWAYS);
-        }
-    }
-
-    @Override
-    public void onActionModeStarted(ActionMode mode) {
-        super.onActionModeStarted(mode);
-        if (mode != null && mode.getMenu() != null) {
-            ensureMeaningMenuItem(mode.getMenu());
-        }
-    }
-
-    @Nullable
-    @Override
-    public ActionMode onWindowStartingActionMode(ActionMode.Callback callback, int type) {
-        ActionMode.Callback customCallback = new ActionMode.Callback2() {
-            @Override
-            public boolean onCreateActionMode(ActionMode mode, Menu menu) {
-                boolean result = callback.onCreateActionMode(mode, menu);
-                ensureMeaningMenuItem(menu);
-                return result;
-            }
-
-            @Override
-            public boolean onPrepareActionMode(ActionMode mode, Menu menu) {
-                boolean result = callback.onPrepareActionMode(mode, menu);
-                ensureMeaningMenuItem(menu);
-                return result;
-            }
-
-            @Override
-            public boolean onActionItemClicked(ActionMode mode, MenuItem item) {
-                if (item.getItemId() == R.id.action_meaning) {
-                    MenuItem copyItem = mode.getMenu().findItem(android.R.id.copy);
-                    if (copyItem != null) {
-                        callback.onActionItemClicked(mode, copyItem);
-                    } else {
-                        mode.getMenu().performIdentifierAction(android.R.id.copy, 0);
-                    }
-
-                    new Handler(Looper.getMainLooper()).postDelayed(() -> {
-                        ClipboardManager clipboard = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
-                        if (clipboard != null && clipboard.hasPrimaryClip() && clipboard.getPrimaryClip() != null) {
-                            ClipData clip = clipboard.getPrimaryClip();
-                            if (clip.getItemCount() > 0 && clip.getItemAt(0).getText() != null) {
-                                String selectedText = clip.getItemAt(0).getText().toString().trim();
-                                try {
-                                    mode.finish();
-                                } catch (Exception ignored) {}
-                                if (!selectedText.isEmpty()) {
-                                    ExplanationBottomSheet.newInstance(selectedText)
-                                            .show(getSupportFragmentManager(), "explanation_bottom_sheet");
-                                }
-                            }
-                        }
-                    }, 50);
-                    return true;
-                }
-                return callback.onActionItemClicked(mode, item);
-            }
-
-            @Override
-            public void onDestroyActionMode(ActionMode mode) {
-                callback.onDestroyActionMode(mode);
-            }
-
-            @Override
-            public void onGetContentRect(ActionMode mode, View view, Rect outRect) {
-                if (callback instanceof ActionMode.Callback2) {
-                    ((ActionMode.Callback2) callback).onGetContentRect(mode, view, outRect);
-                }
-            }
-        };
-
-        return super.onWindowStartingActionMode(customCallback, type);
     }
 
     private void handleIncomingIntent(Intent intent) {
@@ -218,18 +142,7 @@ public class MainActivity extends AppCompatActivity {
             }
             Log.d(TAG, "Incoming intent URI: " + pdfUri);
             if (pdfUri != null && isSdkExtensionSupported()) {
-                try {
-                    getContentResolver().takePersistableUriPermission(
-                            pdfUri,
-                            Intent.FLAG_GRANT_READ_URI_PERMISSION
-                    );
-                } catch (Exception e) {
-                    Log.w(TAG, "Failed to take persistable URI permission for intent data", e);
-                }
-                initializePdfViewerFragment();
-                if (pdfViewerFragment != null) {
-                    pdfViewerFragment.setDocumentUri(pdfUri);
-                }
+                openDocument(pdfUri);
             }
         }
     }
@@ -350,24 +263,127 @@ public class MainActivity extends AppCompatActivity {
             ((PdfViewerFragmentExtended) pdfViewerFragment).setOnPdfEventListener(new PdfViewerFragmentExtended.OnPdfEventListener() {
                 @Override
                 public void onDocumentLoaded() {
-                    setBottomControlsVisible(false);
+                    updatePageVisibility();
                 }
 
                 @Override
                 public void onImmersiveModeRequested(boolean enterImmersive) {
-                    setBottomControlsVisible(!enterImmersive);
+                    // Corner tools stay reachable while reading.
                 }
             });
         }
     }
 
-    private void setBottomControlsVisible(boolean visible) {
-        int visibility = visible ? View.VISIBLE : View.GONE;
-        if (getContentButton != null) {
-            getContentButton.setVisibility(visibility);
+    public String getCurrentDocumentUri() { return currentDocumentUri; }
+
+    @Override protected void onSaveInstanceState(@NonNull Bundle state) {
+        state.putString("current_document_uri", currentDocumentUri);
+        state.putBoolean("showing_document", showingDocument);
+        super.onSaveInstanceState(state);
+    }
+
+    private void openDocument(Uri uri) {
+        if (!isSdkExtensionSupported()) {
+            Toast.makeText(this, "This device does not support the PDF viewer.", Toast.LENGTH_LONG).show();
+            return;
         }
-        if (searchButton != null) {
-            searchButton.setVisibility(visibility);
+        try {
+            // Confirm access before hiding the home screen. Some share URIs expire.
+            try (android.content.res.AssetFileDescriptor file = getContentResolver().openAssetFileDescriptor(uri, "r")) {
+                if (file == null) throw new java.io.IOException("Document unavailable");
+            }
+            try { getContentResolver().takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION); }
+            catch (SecurityException ignored) { /* Temporary external grants may not persist. */ }
+            initializePdfViewerFragment();
+            currentDocumentUri = uri.toString();
+            showingDocument = true;
+            pdfViewerFragment.setDocumentUri(uri);
+            String title = uri.getLastPathSegment();
+            try (Cursor cursor = getContentResolver().query(uri, new String[]{OpenableColumns.DISPLAY_NAME}, null, null, null)) {
+                if (cursor != null && cursor.moveToFirst()) title = cursor.getString(0);
+            } catch (RuntimeException ignored) { }
+            readingStore.recordDocument(currentDocumentUri, title == null ? "PDF document" : title);
+            updatePageVisibility();
+        } catch (Exception error) {
+            Toast.makeText(this, "Cannot reopen this PDF. Use Open to select it again.", Toast.LENGTH_LONG).show();
         }
+    }
+
+    private void showHome() {
+        showingDocument = false;
+        updatePageVisibility();
+        refreshRecentDocuments();
+    }
+    private void updatePageVisibility() {
+        findViewById(R.id.home_content).setVisibility(showingDocument ? View.GONE : View.VISIBLE);
+        findViewById(R.id.fragment_container_view).setVisibility(showingDocument ? View.VISIBLE : View.GONE);
+        if (searchButton != null) { searchButton.setEnabled(showingDocument); searchButton.setAlpha(showingDocument ? 1f : 0.4f); }
+        findViewById(R.id.home_button).setVisibility(showingDocument ? View.VISIBLE : View.GONE);
+    }
+
+    private int dp(int value) { return Math.round(value * getResources().getDisplayMetrics().density); }
+
+    private MaterialCardView listCard(String title, String subtitle) {
+        MaterialCardView card = new MaterialCardView(this);
+        card.setRadius(dp(18));
+        card.setCardElevation(0);
+        card.setStrokeWidth(dp(1));
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, -2);
+        params.bottomMargin = dp(12); card.setLayoutParams(params);
+        LinearLayout contents = new LinearLayout(this);
+        contents.setOrientation(LinearLayout.VERTICAL); contents.setPadding(dp(18), dp(16), dp(18), dp(16));
+        TextView heading = new TextView(this); heading.setText(title);
+        heading.setTextAppearance(com.google.android.material.R.style.TextAppearance_Material3_TitleMedium);
+        contents.addView(heading);
+        if (subtitle != null && !subtitle.isEmpty()) {
+            TextView detail = new TextView(this); detail.setText(subtitle); detail.setMaxLines(2);
+            detail.setEllipsize(android.text.TextUtils.TruncateAt.END);
+            detail.setTextAppearance(com.google.android.material.R.style.TextAppearance_Material3_BodySmall);
+            detail.setPadding(0, dp(6), 0, 0); contents.addView(detail);
+        }
+        card.addView(contents); card.setClickable(true); card.setFocusable(true);
+        return card;
+    }
+    private void refreshRecentDocuments() {
+        final int request = ++homeLoadId;
+        readingStore.documents(documents -> {
+            if (isFinishing() || isDestroyed() || request != homeLoadId) return;
+            LinearLayout rows = findViewById(R.id.recent_documents); rows.removeAllViews();
+            findViewById(R.id.recent_empty).setVisibility(documents.isEmpty() ? View.VISIBLE : View.GONE);
+            for (ReadingStore.Document document : documents) {
+                MaterialCardView card = listCard(document.title, document.uri);
+                card.setOnClickListener(v -> openDocument(Uri.parse(document.uri))); rows.addView(card);
+            }
+        });
+    }
+    private void showWordHistory() {
+        final String documentUri = showingDocument ? currentDocumentUri : null;
+        LinearLayout content = new LinearLayout(this); content.setOrientation(LinearLayout.VERTICAL);
+        content.setPadding(dp(20), dp(12), dp(20), 0);
+        MaterialSwitch recording = new MaterialSwitch(this);
+        recording.setText("Save word history"); recording.setChecked(readingStore.historyEnabled());
+        recording.setOnCheckedChangeListener((button, checked) -> readingStore.setHistoryEnabled(checked));
+        content.addView(recording);
+        TextView description = new TextView(this);
+        description.setText(documentUri == null ? "Open a PDF to see its saved words and idioms. Turning this off stops new entries; saved words stay available."
+                : "Words and idioms from this PDF. Turning recording off keeps existing entries.");
+        description.setPadding(0, dp(8), 0, dp(16)); content.addView(description);
+        ScrollView scroll = new ScrollView(this); LinearLayout rows = new LinearLayout(this);
+        rows.setOrientation(LinearLayout.VERTICAL); scroll.addView(rows);
+        content.addView(scroll, new LinearLayout.LayoutParams(-1, dp(280)));
+        AlertDialog dialog = new MaterialAlertDialogBuilder(this).setTitle("Word history").setView(content)
+                .setPositiveButton("Close", null).create(); dialog.show();
+        if (documentUri != null) readingStore.words(documentUri, words -> {
+            if (!dialog.isShowing() || isDestroyed()) return;
+            if (words.isEmpty()) { TextView empty = new TextView(this); empty.setText("No saved words yet. Select text in this PDF and tap Meaning."); rows.addView(empty); }
+            for (ReadingStore.Word word : words) {
+                MaterialCardView card = listCard(word.term, word.explanation);
+                card.setOnClickListener(v -> {
+                    dialog.dismiss();
+                    if (!getSupportFragmentManager().isStateSaved()) ExplanationBottomSheet.newInstance(
+                            word.term, documentUri, word.explanation).show(getSupportFragmentManager(), "explanation_bottom_sheet");
+                }); rows.addView(card);
+            }
+        });
     }
 }

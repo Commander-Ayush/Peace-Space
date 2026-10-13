@@ -16,10 +16,10 @@ public class LlmHelper {
     private static final String TAG = "LlmHelper";
     private static LlmHelper instance;
 
-    private LlmInference llmInference;
+    private volatile LlmInference llmInference;
     private final ExecutorService executorService = Executors.newSingleThreadExecutor();
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
-    private boolean isInitializing = false;
+    private volatile boolean isInitializing = false;
 
     public interface LlmCallback {
         void onTokenGenerated(String partialResult, boolean isComplete);
@@ -87,39 +87,34 @@ public class LlmHelper {
     }
 
     public void explainText(String selectedText, LlmCallback callback) {
-        if (llmInference == null) {
-            if (callback != null) {
-                callback.onError(new IllegalStateException("LLM Model is not initialized. Please load Gemma model first."));
-            }
-            return;
-        }
-
-        String prompt = "You are a helpful dictionary and language assistant. Explain the meaning of the following text, phrase, or idiom concisely in clear, simple English. Provide a definition and an example sentence:\n\n\"" + selectedText.trim() + "\"";
-
-        try {
-            llmInference.generateResponseAsync(prompt, (partialResult, done) -> {
+        // Serialize inference with initialization and other requests. Closing a panel
+        // does not cancel native generation; another selection waits for completion.
+        executorService.execute(() -> {
+            try {
+                if (llmInference == null) throw new IllegalStateException(
+                        "The model is not ready yet. Wait for it to load and try again.");
+                String prompt = "You are a helpful dictionary and language assistant. Explain the meaning of the following text, phrase, or idiom concisely in clear, simple English. Provide a definition and an example sentence:\n\n\"" + selectedText.trim() + "\"";
+                llmInference.generateResponseAsync(prompt, (partialResult, done) -> {
+                    mainHandler.post(() -> {
+                        if (callback != null) callback.onTokenGenerated(partialResult, done);
+                    });
+                }).get();
+            } catch (Exception error) {
+                Log.e(TAG, "Error generating response", error);
                 mainHandler.post(() -> {
-                    if (callback != null) {
-                        callback.onTokenGenerated(partialResult, done);
-                    }
+                    if (callback != null) callback.onError(error);
                 });
-            });
-        } catch (Exception e) {
-            Log.e(TAG, "Error generating response", e);
-            if (callback != null) {
-                callback.onError(e);
             }
-        }
+        });
     }
 
     public void close() {
-        if (llmInference != null) {
-            try {
-                llmInference.close();
-                llmInference = null;
-            } catch (Exception e) {
-                Log.e(TAG, "Error closing LLM inference engine", e);
+        executorService.execute(() -> {
+            if (llmInference != null) {
+                try { llmInference.close(); }
+                catch (Exception error) { Log.e(TAG, "Error closing inference", error); }
+                finally { llmInference = null; }
             }
-        }
+        });
     }
 }

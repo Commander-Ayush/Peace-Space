@@ -1,0 +1,4 @@
+<resources>
+<style name="ExplanationPanelAnimation"><item name="android:windowEnterAnimation">@anim/panel_enter</item><item name="android:windowExitAnimation">@anim/panel_exit</item></style>
+<style name="ExplanationDialog" parent="ThemeOverlay.Material3.MaterialAlertDialog"><item name="android:windowNoTitle">true</item><item name="android:windowBackground">@android:color/transparent</item><item name="android:backgroundDimEnabled">true</item><item name="android:windowCloseOnTouchOutside">true</item></style>
+</resources>

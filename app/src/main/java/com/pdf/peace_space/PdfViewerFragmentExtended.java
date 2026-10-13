@@ -4,8 +4,12 @@ import android.os.Build;
 import android.util.Log;
 
 import androidx.annotation.NonNull;
+import androidx.annotation.OptIn;
+import androidx.pdf.ExperimentalPdfApi;
 import androidx.annotation.RequiresExtension;
 import androidx.pdf.PdfDocument;
+import androidx.pdf.selection.model.TextSelection;
+import androidx.pdf.view.PdfView;
 import androidx.pdf.viewer.fragment.PdfViewerFragment;
 
 @RequiresExtension(extension = Build.VERSION_CODES.S, version = 13)
@@ -21,6 +25,27 @@ public class PdfViewerFragmentExtended extends PdfViewerFragment {
 
     public void setOnPdfEventListener(OnPdfEventListener listener) {
         this.pdfEventListener = listener;
+    }
+
+    @OptIn(markerClass = ExperimentalPdfApi.class)
+    @Override
+    public void onPdfViewCreated(@NonNull PdfView pdfView) {
+        super.onPdfViewCreated(pdfView);
+        pdfView.addSelectionMenuItemPreparer(components -> {
+            if (!(pdfView.getCurrentSelection() instanceof TextSelection)) {
+                return;
+            }
+            components.add(0, MeaningSelectionAction.create(pdfView::getCurrentSelection, text -> {
+                if (isAdded() && !getParentFragmentManager().isStateSaved()
+                        && getParentFragmentManager().findFragmentByTag(
+                                "explanation_bottom_sheet") == null) {
+                    ExplanationBottomSheet.newInstance(text,
+                            getActivity() instanceof MainActivity ? ((MainActivity) getActivity()).getCurrentDocumentUri() : null,
+                            null).show(
+                            getParentFragmentManager(), "explanation_bottom_sheet");
+                }
+            }));
+        });
     }
 
     @Override

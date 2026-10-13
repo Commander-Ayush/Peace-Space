@@ -2,17 +2,10 @@
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
-    android:layout_height="wrap_content"
+    android:layout_height="match_parent"
     android:orientation="vertical"
     android:padding="20dp"
-    android:background="?attr/colorSurface">
-
-    <View
-        android:layout_width="32dp"
-        android:layout_height="4dp"
-        android:layout_gravity="center_horizontal"
-        android:layout_marginBottom="16dp"
-        android:background="?attr/colorOutline" />
+    android:background="@drawable/explanation_surface">
 
     <TextView
         android:id="@+id/tv_selected_text_title"
@@ -22,35 +15,43 @@
         android:textAppearance="?attr/textAppearanceTitleLarge"
         android:textStyle="bold" />
 
-    <TextView
-        android:id="@+id/tv_selected_text"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="8dp"
-        android:textAppearance="?attr/textAppearanceBodyMedium"
-        android:textColor="?attr/colorPrimary"
-        android:textStyle="italic" />
-
-    <com.google.android.material.progressindicator.LinearProgressIndicator
-        android:id="@+id/progress_indicator"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="12dp"
-        android:indeterminate="true" />
-
     <androidx.core.widget.NestedScrollView
         android:id="@+id/nested_scroll_view"
         android:layout_width="match_parent"
-        android:layout_height="180dp"
+        android:layout_height="0dp"
+        android:layout_weight="1"
         android:layout_marginTop="12dp"
         android:fillViewport="true">
 
-        <TextView
-            android:id="@+id/tv_explanation_result"
+        <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="Generating explanation..."
-            android:textAppearance="?attr/textAppearanceBodyLarge" />
+            android:orientation="vertical">
+
+            <TextView
+                android:id="@+id/tv_selected_text"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:textAppearance="?attr/textAppearanceBodyMedium"
+                android:textColor="?attr/colorPrimary"
+                android:textStyle="italic" />
+
+            <com.google.android.material.progressindicator.LinearProgressIndicator
+                android:id="@+id/progress_indicator"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:indeterminate="true" />
+
+            <TextView
+                android:id="@+id/tv_explanation_result"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:text="Generating explanation..."
+                android:textAppearance="?attr/textAppearanceBodyLarge" />
+        </LinearLayout>
     </androidx.core.widget.NestedScrollView>
 
     <LinearLayout
