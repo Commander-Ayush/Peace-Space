@@ -3,6 +3,7 @@ package com.pdf.peace_space;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
+import android.content.res.Configuration;
 import android.os.Bundle;
 import android.view.LayoutInflater;
 import android.view.View;
@@ -13,6 +14,7 @@ import android.widget.Toast;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 
+import com.google.android.material.bottomsheet.BottomSheetBehavior;
 import com.google.android.material.bottomsheet.BottomSheetDialogFragment;
 import com.google.android.material.button.MaterialButton;
 import com.google.android.material.progressindicator.LinearProgressIndicator;
@@ -25,6 +27,7 @@ public class ExplanationBottomSheet extends BottomSheetDialogFragment {
     private TextView tvSelectedText;
     private TextView tvExplanationResult;
     private LinearProgressIndicator progressIndicator;
+    private final StringBuilder accumulatedExplanation = new StringBuilder();
 
     public static ExplanationBottomSheet newInstance(String selectedText) {
         ExplanationBottomSheet fragment = new ExplanationBottomSheet();
@@ -76,6 +79,28 @@ public class ExplanationBottomSheet extends BottomSheetDialogFragment {
         return view;
     }
 
+    @Override
+    public void onStart() {
+        super.onStart();
+        if (getDialog() != null) {
+            View bottomSheet = getDialog().findViewById(com.google.android.material.R.id.design_bottom_sheet);
+            if (bottomSheet != null) {
+                BottomSheetBehavior<View> behavior = BottomSheetBehavior.from(bottomSheet);
+
+                int orientation = getResources().getConfiguration().orientation;
+                int screenHeight = getResources().getDisplayMetrics().heightPixels;
+
+                if (orientation == Configuration.ORIENTATION_LANDSCAPE) {
+                    bottomSheet.getLayoutParams().height = (int) (screenHeight * 0.65);
+                    behavior.setState(BottomSheetBehavior.STATE_EXPANDED);
+                } else {
+                    behavior.setPeekHeight((int) (screenHeight * 0.50));
+                    behavior.setState(BottomSheetBehavior.STATE_COLLAPSED);
+                }
+            }
+        }
+    }
+
     private void generateExplanation() {
         if (selectedText == null || selectedText.trim().isEmpty()) {
             tvExplanationResult.setText("No text selected to explain.");
@@ -84,12 +109,16 @@ public class ExplanationBottomSheet extends BottomSheetDialogFragment {
         }
 
         progressIndicator.setVisibility(View.VISIBLE);
+        accumulatedExplanation.setLength(0);
 
         LlmHelper.getInstance().explainText(selectedText, new LlmHelper.LlmCallback() {
             @Override
             public void onTokenGenerated(String partialResult, boolean isComplete) {
                 if (isAdded()) {
-                    tvExplanationResult.setText(partialResult);
+                    if (partialResult != null) {
+                        accumulatedExplanation.append(partialResult);
+                        tvExplanationResult.setText(accumulatedExplanation.toString());
+                    }
                     if (isComplete) {
                         progressIndicator.setVisibility(View.GONE);
                     }

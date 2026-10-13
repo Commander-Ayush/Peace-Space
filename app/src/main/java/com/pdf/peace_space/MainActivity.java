@@ -1,12 +1,21 @@
 package com.pdf.peace_space;
 
+import android.content.ClipData;
+import android.content.ClipboardManager;
+import android.content.Context;
 import android.content.Intent;
+import android.graphics.Rect;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Environment;
+import android.os.Handler;
+import android.os.Looper;
 import android.os.ext.SdkExtensions;
 import android.util.Log;
+import android.view.ActionMode;
+import android.view.Menu;
+import android.view.MenuItem;
 import android.view.View;
 import android.view.WindowManager;
 import android.widget.TextView;
@@ -15,6 +24,7 @@ import android.widget.Toast;
 import androidx.activity.result.ActivityResultLauncher;
 import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.annotation.NonNull;
+import androidx.annotation.Nullable;
 import androidx.annotation.RequiresExtension;
 import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.app.AppCompatActivity;
@@ -114,6 +124,86 @@ public class MainActivity extends AppCompatActivity {
         super.onNewIntent(intent);
         setIntent(intent);
         handleIncomingIntent(intent);
+    }
+
+    private void ensureMeaningMenuItem(Menu menu) {
+        if (menu != null && menu.findItem(R.id.action_meaning) == null) {
+            menu.add(Menu.NONE, R.id.action_meaning, 0, "Meaning")
+                    .setShowAsAction(MenuItem.SHOW_AS_ACTION_ALWAYS);
+        }
+    }
+
+    @Override
+    public void onActionModeStarted(ActionMode mode) {
+        super.onActionModeStarted(mode);
+        if (mode != null && mode.getMenu() != null) {
+            ensureMeaningMenuItem(mode.getMenu());
+        }
+    }
+
+    @Nullable
+    @Override
+    public ActionMode onWindowStartingActionMode(ActionMode.Callback callback, int type) {
+        ActionMode.Callback customCallback = new ActionMode.Callback2() {
+            @Override
+            public boolean onCreateActionMode(ActionMode mode, Menu menu) {
+                boolean result = callback.onCreateActionMode(mode, menu);
+                ensureMeaningMenuItem(menu);
+                return result;
+            }
+
+            @Override
+            public boolean onPrepareActionMode(ActionMode mode, Menu menu) {
+                boolean result = callback.onPrepareActionMode(mode, menu);
+                ensureMeaningMenuItem(menu);
+                return result;
+            }
+
+            @Override
+            public boolean onActionItemClicked(ActionMode mode, MenuItem item) {
+                if (item.getItemId() == R.id.action_meaning) {
+                    MenuItem copyItem = mode.getMenu().findItem(android.R.id.copy);
+                    if (copyItem != null) {
+                        callback.onActionItemClicked(mode, copyItem);
+                    } else {
+                        mode.getMenu().performIdentifierAction(android.R.id.copy, 0);
+                    }
+
+                    new Handler(Looper.getMainLooper()).postDelayed(() -> {
+                        ClipboardManager clipboard = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+                        if (clipboard != null && clipboard.hasPrimaryClip() && clipboard.getPrimaryClip() != null) {
+                            ClipData clip = clipboard.getPrimaryClip();
+                            if (clip.getItemCount() > 0 && clip.getItemAt(0).getText() != null) {
+                                String selectedText = clip.getItemAt(0).getText().toString().trim();
+                                try {
+                                    mode.finish();
+                                } catch (Exception ignored) {}
+                                if (!selectedText.isEmpty()) {
+                                    ExplanationBottomSheet.newInstance(selectedText)
+                                            .show(getSupportFragmentManager(), "explanation_bottom_sheet");
+                                }
+                            }
+                        }
+                    }, 50);
+                    return true;
+                }
+                return callback.onActionItemClicked(mode, item);
+            }
+
+            @Override
+            public void onDestroyActionMode(ActionMode mode) {
+                callback.onDestroyActionMode(mode);
+            }
+
+            @Override
+            public void onGetContentRect(ActionMode mode, View view, Rect outRect) {
+                if (callback instanceof ActionMode.Callback2) {
+                    ((ActionMode.Callback2) callback).onGetContentRect(mode, view, outRect);
+                }
+            }
+        };
+
+        return super.onWindowStartingActionMode(customCallback, type);
     }
 
     private void handleIncomingIntent(Intent intent) {
