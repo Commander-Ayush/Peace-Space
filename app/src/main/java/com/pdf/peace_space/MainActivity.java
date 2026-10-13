@@ -4,16 +4,19 @@ import android.content.Intent;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Environment;
 import android.os.ext.SdkExtensions;
 import android.util.Log;
 import android.view.View;
 import android.view.WindowManager;
+import android.widget.TextView;
 import android.widget.Toast;
 
 import androidx.activity.result.ActivityResultLauncher;
 import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.annotation.NonNull;
 import androidx.annotation.RequiresExtension;
+import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.graphics.Insets;
 import androidx.core.view.ViewCompat;
@@ -23,13 +26,19 @@ import androidx.fragment.app.FragmentManager;
 import androidx.fragment.app.FragmentTransaction;
 import androidx.pdf.viewer.fragment.PdfViewerFragment;
 
+import com.google.android.material.dialog.MaterialAlertDialogBuilder;
 import com.google.android.material.button.MaterialButton;
+import com.google.android.material.progressindicator.LinearProgressIndicator;
+
+import java.io.File;
+import java.util.Locale;
 
 public class MainActivity extends AppCompatActivity {
 
     private static final String TAG = "MainActivity";
     private static final String MIME_TYPE_PDF = "application/pdf";
     private static final String PDF_VIEWER_FRAGMENT_TAG = "pdf_viewer_fragment_tag";
+    public static final String DEFAULT_MODEL_URL = "https://huggingface.co/litert-community/Gemma3-1B-IT/resolve/main/gemma3-1b-it-int4.task";
 
     private PdfViewerFragment pdfViewerFragment;
     private MaterialButton getContentButton;
@@ -97,6 +106,7 @@ public class MainActivity extends AppCompatActivity {
         });
 
         handleIncomingIntent(getIntent());
+        checkAndInitializeLlmModel();
     }
 
     @Override
@@ -132,6 +142,91 @@ public class MainActivity extends AppCompatActivity {
                 }
             }
         }
+    }
+
+    private void checkAndInitializeLlmModel() {
+        File downloadsDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS);
+        File internalDir = getFilesDir();
+        File externalDir = getExternalFilesDir(null);
+        File adbTmpDir = new File("/data/local/tmp/llm/");
+
+        File[] candidateLocations = new File[]{
+                ModelDownloader.getTargetModelFile(this),
+                new File(adbTmpDir, "model_version.task"),
+                new File(adbTmpDir, "gemma3-1b-it-int4.task"),
+                new File(adbTmpDir, "gemma-3-1b-it.task"),
+                new File(downloadsDir, "gemma3-1b-it-int4.task"),
+                new File(downloadsDir, "gemma-3-1b-it-gpu-int4.bin"),
+                new File(downloadsDir, "gemma-2b-it-cpu-int4.bin"),
+                new File(downloadsDir, "gemma.bin"),
+                new File(internalDir, "gemma3-1b-it-int4.task"),
+                new File(internalDir, "gemma-3-1b-it-gpu-int4.bin"),
+                new File(externalDir, "gemma3-1b-it-int4.task")
+        };
+
+        File foundModel = null;
+        for (File candidate : candidateLocations) {
+            if (candidate.exists()) {
+                foundModel = candidate;
+                break;
+            }
+        }
+
+        if (foundModel != null) {
+            Log.d(TAG, "Found LLM model at: " + foundModel.getAbsolutePath());
+            LlmHelper.getInstance().initializeModel(this, foundModel.getAbsolutePath(), new LlmHelper.LlmCallback() {
+                @Override
+                public void onTokenGenerated(String partialResult, boolean isComplete) {
+                    Log.d(TAG, "LLM Model initialized: " + partialResult);
+                }
+
+                @Override
+                public void onError(Throwable error) {
+                    Log.e(TAG, "Failed to initialize LLM Model", error);
+                }
+            });
+        } else {
+            Log.w(TAG, "No Gemma model file found. Launching auto-downloader...");
+            startModelDownload(DEFAULT_MODEL_URL);
+        }
+    }
+
+    public void startModelDownload(String modelUrl) {
+        View dialogView = getLayoutInflater().inflate(R.layout.dialog_model_download, null);
+        LinearProgressIndicator progressBar = dialogView.findViewById(R.id.download_progress_bar);
+        TextView statusText = dialogView.findViewById(R.id.tv_download_status);
+
+        MaterialAlertDialogBuilder dialogBuilder = new MaterialAlertDialogBuilder(this)
+                .setView(dialogView)
+                .setCancelable(false);
+
+        AlertDialog dialog = dialogBuilder.create();
+        dialog.show();
+
+        ModelDownloader downloader = new ModelDownloader(this);
+        downloader.downloadModel(modelUrl, new ModelDownloader.DownloadCallback() {
+            @Override
+            public void onProgress(int progressPercent, long downloadedBytes, long totalBytes) {
+                progressBar.setIndeterminate(false);
+                progressBar.setProgress(progressPercent);
+                long downloadedMb = downloadedBytes / (1024 * 1024);
+                long totalMb = totalBytes / (1024 * 1024);
+                statusText.setText(String.format(Locale.getDefault(), "Downloaded %d MB / %d MB (%d%%)", downloadedMb, totalMb, progressPercent));
+            }
+
+            @Override
+            public void onCompleted(File modelFile) {
+                dialog.dismiss();
+                Toast.makeText(MainActivity.this, "Model download complete!", Toast.LENGTH_LONG).show();
+                checkAndInitializeLlmModel();
+            }
+
+            @Override
+            public void onError(Exception e) {
+                dialog.dismiss();
+                Toast.makeText(MainActivity.this, "Model download failed: " + e.getLocalizedMessage(), Toast.LENGTH_LONG).show();
+            }
+        });
     }
 
     private boolean isSdkExtensionSupported() {

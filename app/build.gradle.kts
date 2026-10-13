@@ -1,6 +1,15 @@
+import java.util.Properties
+
 plugins {
     alias(libs.plugins.android.application)
 }
+
+val localProperties = Properties()
+val localPropertiesFile = rootProject.file("local.properties")
+if (localPropertiesFile.exists()) {
+    localPropertiesFile.inputStream().use { localProperties.load(it) }
+}
+val hfToken = localProperties.getProperty("HF_TOKEN") ?: ""
 
 android {
     namespace = "com.pdf.peace_space"
@@ -16,6 +25,12 @@ android {
         versionName = "1.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+        buildConfigField("String", "HF_TOKEN", "\"$hfToken\"")
+    }
+
+    buildFeatures {
+        buildConfig = true
     }
 
     buildTypes {

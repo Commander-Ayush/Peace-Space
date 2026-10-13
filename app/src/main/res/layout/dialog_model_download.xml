@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="vertical"
+    android:padding="24dp">
+
+    <TextView
+        android:id="@+id/tv_download_title"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Downloading AI Model"
+        android:textAppearance="?attr/textAppearanceTitleLarge"
+        android:textStyle="bold" />
+
+    <TextView
+        android:id="@+id/tv_download_subtitle"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:text="Downloading Gemma 3 1B AI model for text and idiom explanations. Please keep the app open."
+        android:textAppearance="?attr/textAppearanceBodyMedium" />
+
+    <com.google.android.material.progressindicator.LinearProgressIndicator
+        android:id="@+id/download_progress_bar"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="20dp"
+        android:indeterminate="true" />
+
+    <TextView
+        android:id="@+id/tv_download_status"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="12dp"
+        android:text="Starting download..."
+        android:textAppearance="?attr/textAppearanceBodySmall"
+        android:textColor="?attr/colorPrimary" />
+
+</LinearLayout>
