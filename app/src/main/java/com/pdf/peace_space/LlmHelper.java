@@ -6,6 +6,7 @@ import android.os.Looper;
 import android.util.Log;
 
 import com.google.mediapipe.tasks.genai.llminference.LlmInference;
+import com.google.mediapipe.tasks.genai.llminference.LlmInferenceSession;
 
 import java.io.File;
 import java.util.concurrent.ExecutorService;
@@ -86,26 +87,62 @@ public class LlmHelper {
         });
     }
 
-    public void explainText(String selectedText, LlmCallback callback) {
-        // Serialize inference with initialization and other requests. Closing a panel
-        // does not cancel native generation; another selection waits for completion.
+    public interface Generation { void cancel(); }
+
+    private static final class Request implements Generation {
+        volatile boolean cancelled;
+        LlmInferenceSession session;
+        @Override public synchronized void cancel() {
+            if (cancelled) return;
+            cancelled = true;
+            if (session != null) {
+                try { session.cancelGenerateResponseAsync(); }
+                catch (RuntimeException error) { Log.w(TAG, "Unable to cancel generation", error); }
+            }
+        }
+    }
+
+    public Generation explainText(String selectedText, LlmCallback callback) {
+        Request request = new Request();
         executorService.execute(() -> {
+            if (request.cancelled) return;
             try {
                 if (llmInference == null) throw new IllegalStateException(
                         "The model is not ready yet. Wait for it to load and try again.");
                 String prompt = "You are a helpful dictionary and language assistant. Explain the meaning of the following text, phrase, or idiom concisely in clear, simple English. Provide a definition and an example sentence:\n\n\"" + selectedText.trim() + "\"";
-                llmInference.generateResponseAsync(prompt, (partialResult, done) -> {
-                    mainHandler.post(() -> {
-                        if (callback != null) callback.onTokenGenerated(partialResult, done);
+                com.google.common.util.concurrent.ListenableFuture<String> response;
+                synchronized (request) {
+                    if (request.cancelled) return;
+                    request.session = LlmInferenceSession.createFromOptions(llmInference,
+                            LlmInferenceSession.LlmInferenceSessionOptions.builder().setTopK(40).build());
+                    request.session.addQueryChunk(prompt);
+                    response = request.session.generateResponseAsync((partialResult, done) -> {
+                        mainHandler.post(() -> {
+                            if (!request.cancelled && callback != null) callback.onTokenGenerated(partialResult, done);
+                        });
                     });
-                }).get();
+                }
+                // Native cancellation finishes through the completion callback. Wait for that
+                // before closing this session or starting another on the same inference engine.
+                response.get();
             } catch (Exception error) {
-                Log.e(TAG, "Error generating response", error);
-                mainHandler.post(() -> {
-                    if (callback != null) callback.onError(error);
-                });
+                if (!request.cancelled) {
+                    Log.e(TAG, "Error generating response", error);
+                    mainHandler.post(() -> {
+                        if (!request.cancelled && callback != null) callback.onError(error);
+                    });
+                }
+            } finally {
+                synchronized (request) {
+                    if (request.session != null) {
+                        try { request.session.close(); }
+                        catch (RuntimeException error) { Log.w(TAG, "Unable to close generation session", error); }
+                        request.session = null;
+                    }
+                }
             }
         });
+        return request;
     }
 
     public void close() {

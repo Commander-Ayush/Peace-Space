@@ -22,19 +22,20 @@ import static org.junit.Assert.*;
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
 public class OverlayLayoutTest {
     @Test public void portraitCardAndLandscapePanelKeepScrollAreaAndButtonsVisible() throws Exception {
-        renderExplanation(360, 450, "portrait");
-        renderExplanation(420, 300, "landscape");
+        renderExplanation(310, 340, "portrait");
+        renderExplanation(320, 240, "landscape");
+        renderExplanation(310, 340, "custom-colors");
     }
     @Test public void homeControlsFitAtBottomRight() throws Exception {
         try (org.robolectric.android.controller.ActivityController<Activity> controller = Robolectric.buildActivity(Activity.class)) {
             Activity activity = controller.get(); activity.setTheme(R.style.Theme_PeaceSpace); controller.create();
             View home = LayoutInflater.from(activity).inflate(R.layout.activity_main, null);
-            home.findViewById(R.id.home_button).setVisibility(View.GONE);
+            for (int id : new int[]{R.id.home_button, R.id.search_button, R.id.history_button, R.id.appearance_button}) home.findViewById(id).setVisibility(View.GONE);
             float density = activity.getResources().getDisplayMetrics().density;
             int width = Math.round(390 * density), height = Math.round(780 * density);
             home.measure(View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY), View.MeasureSpec.makeMeasureSpec(height, View.MeasureSpec.EXACTLY));
             home.layout(0, 0, width, height);
-            for (int id : new int[]{R.id.launch_button, R.id.search_button, R.id.history_button}) {
+            for (int id : new int[]{R.id.launch_button}) {
                 androidx.appcompat.widget.AppCompatImageButton button = home.findViewById(id);
                 assertNotNull("Control icon must be loaded", button.getDrawable());
                 assertTrue("Icon needs visible bounds", button.getDrawable().getBounds().width() > 0);
@@ -82,6 +83,9 @@ public class OverlayLayoutTest {
             ((TextView) panel.findViewById(R.id.tv_explanation_result)).setText(
                     "To make people feel more comfortable in a new or awkward situation.\n\nExample\nShe told a funny story to break the ice before the meeting.\n\nThis idiom describes starting a friendly conversation.");
             panel.findViewById(R.id.progress_indicator).setVisibility(View.GONE);
+            OverlayAppearance appearance = new OverlayAppearance(activity);
+            if ("custom-colors".equals(name)) appearance.save(0xff203040, 0xff00b894);
+            appearance.apply(panel);
             float density = activity.getResources().getDisplayMetrics().density;
             int width = Math.round(widthDp * density), height = Math.round(heightDp * density);
             panel.measure(View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY), View.MeasureSpec.makeMeasureSpec(height, View.MeasureSpec.EXACTLY));
@@ -95,6 +99,7 @@ public class OverlayLayoutTest {
             File file = new File("build/previews/" + name + ".png"); file.getParentFile().mkdirs();
             try (FileOutputStream out = new FileOutputStream(file)) { image.compress(Bitmap.CompressFormat.PNG, 100, out); }
             image.recycle();
+            appearance.reset();
         }
     }
 }

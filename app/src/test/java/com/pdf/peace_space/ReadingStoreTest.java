@@ -63,4 +63,29 @@ public class ReadingStoreTest {
         store.recordWordNow("content://book/1", "second", "Saved now");
         assertEquals(2, store.wordsNow("content://book/1").size());
     }
+    @Test public void reconnectingLocationPreservesVocabularyIdentity() {
+        String identity = "content://book/old";
+        store.recordDocumentNow(identity, "Book");
+        store.recordWordNow(identity, "phrase", "Saved explanation");
+        store.reconnectDocumentNow(identity, "content://book/new", "Book");
+        assertEquals(identity, store.identityForAccessUriNow("content://book/new"));
+        store.close(); store = new ReadingStore(RuntimeEnvironment.getApplication(), "test-reading.db");
+        assertEquals("content://book/new", store.accessUriNow(identity));
+        assertEquals("Saved explanation", store.wordsNow(identity).get(0).explanation);
+    }
+    @Test public void schemaUpgradeKeepsExistingDocumentsAndWords() {
+        android.content.Context context = RuntimeEnvironment.getApplication();
+        context.deleteDatabase("migration.db");
+        android.database.sqlite.SQLiteDatabase old = context.openOrCreateDatabase("migration.db", 0, null);
+        old.execSQL("CREATE TABLE documents(uri TEXT PRIMARY KEY,title TEXT NOT NULL,opened INTEGER NOT NULL)");
+        old.execSQL("CREATE TABLE words(document_uri TEXT NOT NULL,term_key TEXT NOT NULL,term TEXT NOT NULL,explanation TEXT,searched INTEGER NOT NULL,PRIMARY KEY(document_uri,term_key))");
+        old.execSQL("INSERT INTO documents VALUES('old-uri','Book',1)");
+        old.execSQL("INSERT INTO words VALUES('old-uri','word','Word','Meaning',1)");
+        old.setVersion(1); old.close();
+        try (ReadingStore migrated = new ReadingStore(context, "migration.db")) {
+            assertEquals("old-uri", migrated.accessUriNow("old-uri"));
+            assertEquals(1, migrated.documentsNow().size());
+            assertEquals("Meaning", migrated.wordsNow("old-uri").get(0).explanation);
+        }
+    }
 }

@@ -15,6 +15,10 @@ import android.os.Environment;
 import android.os.ext.SdkExtensions;
 import android.util.Log;
 import android.view.View;
+import android.view.MotionEvent;
+import android.os.Handler;
+import android.os.Looper;
+import android.graphics.Rect;
 import android.view.WindowManager;
 import android.widget.TextView;
 import android.widget.Toast;
@@ -48,17 +52,61 @@ public class MainActivity extends AppCompatActivity {
     public static final String DEFAULT_MODEL_URL = "https://huggingface.co/litert-community/Gemma3-1B-IT/resolve/main/gemma3-1b-it-int4.task";
 
     private PdfViewerFragment pdfViewerFragment;
+    private androidx.pdf.PdfSandboxHandle pdfSandbox;
+    private androidx.fragment.app.Fragment retiringViewer;
     private AppCompatImageButton getContentButton;
     private AppCompatImageButton searchButton;
     private ReadingStore readingStore;
     private String currentDocumentUri;
+    private String currentAccessUri;
     private boolean showingDocument;
     private int homeLoadId;
+    private int openRequestId;
+    private boolean documentLoaded;
+    private boolean actionsExpanded;
+    private boolean readerTap;
+    private float tapX, tapY;
+    private long tapTime;
+    private String pendingReconnectUri;
+    private boolean transactionsReady;
+    private boolean pickerInFlight;
+    private boolean resolvingPicker;
+    private boolean restoreOnResume;
+    private Uri deferredOpenUri;
+    private String deferredOpenIdentity;
+    private int restorePage;
+    private float restoreZoom = 1f;
+    private int rendererRetries;
+    private Runnable loadWatchdog;
+    private final Handler controlsHandler = new Handler(Looper.getMainLooper());
+    private final Runnable hideControls = () -> {
+        if (showingDocument) {
+            actionsExpanded = false;
+            findViewById(R.id.reading_controls).setVisibility(View.GONE);
+            findViewById(R.id.more_button).setVisibility(View.GONE);
+        }
+    };
 
     private final ActivityResultLauncher<String[]> filePicker =
             registerForActivityResult(new ActivityResultContracts.OpenDocument(), uri -> {
+                pickerInFlight = false;
                 if (uri != null) {
-                    openDocument(uri);
+                    String reconnect = pendingReconnectUri;
+                    pendingReconnectUri = null;
+                    if (reconnect != null) openDocument(uri, reconnect);
+                    else {
+                        final int request = ++openRequestId;
+                        resolvingPicker = true;
+                        resolvePickedDocumentIdentity(uri, identity -> {
+                            if (!isDestroyed() && !isFinishing() && request == openRequestId) {
+                                resolvingPicker = false;
+                                openDocument(uri, identity);
+                            }
+                        });
+                    }
+                } else {
+                    pendingReconnectUri = null;
+                    resumePendingDocument();
                 }
             });
 
@@ -69,7 +117,16 @@ public class MainActivity extends AppCompatActivity {
         readingStore = ReadingStore.get(this);
         if (savedInstanceState != null) {
             currentDocumentUri = savedInstanceState.getString("current_document_uri");
+            currentAccessUri = savedInstanceState.getString("current_access_uri", currentDocumentUri);
             showingDocument = savedInstanceState.getBoolean("showing_document");
+            pendingReconnectUri = savedInstanceState.getString("pending_reconnect_uri");
+            pickerInFlight = savedInstanceState.getBoolean("picker_in_flight");
+            restorePage = savedInstanceState.getInt("reading_page");
+            restoreZoom = savedInstanceState.getFloat("reading_zoom", 1f);
+            String deferred = savedInstanceState.getString("deferred_open_uri");
+            deferredOpenUri = deferred == null ? null : Uri.parse(deferred);
+            deferredOpenIdentity = savedInstanceState.getString("deferred_open_identity");
+            restoreOnResume = showingDocument;
         }
 
         WindowCompat.setDecorFitsSystemWindows(getWindow(), false);
@@ -80,7 +137,7 @@ public class MainActivity extends AppCompatActivity {
         }
 
         ViewCompat.setOnApplyWindowInsetsListener(findViewById(R.id.pdf_container_view), (v, windowInsets) -> {
-            Insets insets = windowInsets.getInsets(
+            Insets insets = showingDocument ? windowInsets.getInsets(WindowInsetsCompat.Type.displayCutout()) : windowInsets.getInsets(
                     WindowInsetsCompat.Type.systemBars() | WindowInsetsCompat.Type.displayCutout()
             );
             v.setPadding(insets.left, insets.top, insets.right, insets.bottom);
@@ -88,6 +145,7 @@ public class MainActivity extends AppCompatActivity {
         });
 
         if (isSdkExtensionSupported()) {
+            retainPdfSandbox();
             pdfViewerFragment = (PdfViewerFragment) getSupportFragmentManager()
                     .findFragmentByTag(PDF_VIEWER_FRAGMENT_TAG);
             attachPdfEventListener();
@@ -96,18 +154,30 @@ public class MainActivity extends AppCompatActivity {
         getContentButton = findViewById(R.id.launch_button);
         searchButton = findViewById(R.id.search_button);
 
-        getContentButton.setOnClickListener(v -> filePicker.launch(new String[]{MIME_TYPE_PDF}));
+        getContentButton.setOnClickListener(v -> {
+            pendingReconnectUri = null;
+            hideControls.run();
+            launchPdfPicker();
+        });
 
         searchButton.setOnClickListener(v -> {
             if (pdfViewerFragment != null) {
                 boolean isSearchActive = pdfViewerFragment.isTextSearchActive();
                 pdfViewerFragment.setTextSearchActive(!isSearchActive);
+                hideControls.run();
             }
         });
 
-        findViewById(R.id.history_button).setOnClickListener(v -> showWordHistory());
+        findViewById(R.id.history_button).setOnClickListener(v -> { hideControls.run(); showWordHistory(); });
+        findViewById(R.id.appearance_settings).setOnClickListener(v -> AppearanceDialog.show(this));
+        findViewById(R.id.appearance_button).setOnClickListener(v -> { hideControls.run(); AppearanceDialog.show(this); });
+        findViewById(R.id.more_button).setOnClickListener(v -> {
+            controlsHandler.removeCallbacks(hideControls);
+            actionsExpanded = true;
+            updatePageVisibility();
+        });
         findViewById(R.id.home_button).setOnClickListener(v -> showHome());
-        for (int id : new int[]{R.id.home_button, R.id.launch_button, R.id.search_button, R.id.history_button}) {
+        for (int id : new int[]{R.id.home_button, R.id.launch_button, R.id.search_button, R.id.history_button, R.id.appearance_button, R.id.more_button}) {
             View control = findViewById(id);
             androidx.appcompat.widget.TooltipCompat.setTooltipText(control, control.getContentDescription());
         }
@@ -121,6 +191,64 @@ public class MainActivity extends AppCompatActivity {
         refreshRecentDocuments();
         if (savedInstanceState == null) handleIncomingIntent(getIntent());
         checkAndInitializeLlmModel();
+    }
+
+    @RequiresExtension(extension = Build.VERSION_CODES.S, version = 13)
+    protected void retainPdfSandbox() {
+        // A stable warm binding prevents isolated-service teardown between documents.
+        if (pdfSandbox == null) pdfSandbox = androidx.pdf.SandboxedPdfLoader.startInitialization(this);
+    }
+
+    protected void resolvePickedDocumentIdentity(Uri uri, java.util.function.Consumer<String> callback) {
+        readingStore.identityForAccessUri(uri.toString(), callback);
+    }
+
+    private void launchPdfPicker() {
+        pickerInFlight = true;
+        filePicker.launch(new String[]{MIME_TYPE_PDF});
+    }
+
+    @Override protected void onPause() {
+        transactionsReady = false;
+        super.onPause();
+    }
+
+    @Override protected void onStop() {
+        if (showingDocument && currentAccessUri != null) {
+            captureReadingPosition();
+            restoreOnResume = true;
+            rendererRetries = 0;
+        }
+        if (loadWatchdog != null) controlsHandler.removeCallbacks(loadWatchdog);
+        super.onStop();
+    }
+
+    @Override protected void onResumeFragments() {
+        super.onResumeFragments();
+        transactionsReady = true;
+        resumePendingDocument();
+    }
+
+    private void resumePendingDocument() {
+        if (!transactionsReady || getSupportFragmentManager().isStateSaved() || isFinishing() || isDestroyed()) return;
+        if (deferredOpenUri != null) {
+            Uri uri = deferredOpenUri; String identity = deferredOpenIdentity;
+            deferredOpenUri = null; deferredOpenIdentity = null;
+            restoreOnResume = false;
+            openDocumentAttempt(uri, identity);
+        } else if (restoreOnResume && showingDocument && currentAccessUri != null
+                && !pickerInFlight && !resolvingPicker) {
+            restoreOnResume = false;
+            openDocumentAttempt(Uri.parse(currentAccessUri), currentDocumentUri);
+        }
+    }
+
+    private void captureReadingPosition() {
+        if (documentLoaded && pdfViewerFragment instanceof PdfViewerFragmentExtended && isSdkExtensionSupported()) {
+            PdfViewerFragmentExtended viewer = (PdfViewerFragmentExtended) pdfViewerFragment;
+            restorePage = viewer.readingPage();
+            restoreZoom = viewer.readingZoom();
+        }
     }
 
     @Override
@@ -147,7 +275,7 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    private void checkAndInitializeLlmModel() {
+    protected void checkAndInitializeLlmModel() {
         File downloadsDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS);
         File internalDir = getFilesDir();
         File externalDir = getExternalFilesDir(null);
@@ -232,93 +360,275 @@ public class MainActivity extends AppCompatActivity {
         });
     }
 
-    private boolean isSdkExtensionSupported() {
+    protected boolean isSdkExtensionSupported() {
         return Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
                 && SdkExtensions.getExtensionVersion(Build.VERSION_CODES.S) >= 13;
     }
 
-    private void initializePdfViewerFragment() {
-        if (pdfViewerFragment == null && isSdkExtensionSupported()) {
-            FragmentManager fragmentManager = getSupportFragmentManager();
+    @RequiresExtension(extension = Build.VERSION_CODES.S, version = 13)
+    protected PdfViewerFragmentExtended createPdfViewerFragment() { return new PdfViewerFragmentExtended(); }
 
-            PdfViewerFragmentExtended extendedFragment = new PdfViewerFragmentExtended();
-            pdfViewerFragment = extendedFragment;
-            attachPdfEventListener();
-
-            FragmentTransaction transaction = fragmentManager.beginTransaction();
-
-            transaction.replace(
-                    R.id.fragment_container_view,
-                    pdfViewerFragment,
-                    PDF_VIEWER_FRAGMENT_TAG
-            );
-            transaction.commitAllowingStateLoss();
-            fragmentManager.executePendingTransactions();
-        }
+    @RequiresExtension(extension = Build.VERSION_CODES.S, version = 13)
+    protected void installViewer(PdfViewerFragmentExtended viewer, Uri uri) {
+        androidx.fragment.app.FragmentTransaction transaction = getSupportFragmentManager().beginTransaction();
+        if (retiringViewer != null && retiringViewer.isAdded()) transaction.hide(retiringViewer);
+        transaction.add(R.id.fragment_container_view, viewer, PDF_VIEWER_FRAGMENT_TAG).commitNow();
+        viewer.setDocumentUri(uri);
     }
 
     @RequiresExtension(extension = Build.VERSION_CODES.S, version = 13)
     private void attachPdfEventListener() {
-        if (pdfViewerFragment instanceof PdfViewerFragmentExtended) {
-            ((PdfViewerFragmentExtended) pdfViewerFragment).setOnPdfEventListener(new PdfViewerFragmentExtended.OnPdfEventListener() {
-                @Override
-                public void onDocumentLoaded() {
-                    updatePageVisibility();
-                }
+        if (!(pdfViewerFragment instanceof PdfViewerFragmentExtended)) return;
+        final PdfViewerFragmentExtended source = (PdfViewerFragmentExtended) pdfViewerFragment;
+        source.setOnPdfEventListener(new PdfViewerFragmentExtended.OnPdfEventListener() {
+            @Override public void onDocumentLoaded() {
+                if (source != pdfViewerFragment || !showingDocument) return;
+                documentLoaded = true;
+                releaseRetiringViewer();
+                if (loadWatchdog != null) controlsHandler.removeCallbacks(loadWatchdog);
+                source.restoreReadingPosition(restorePage, restoreZoom);
+                updatePageVisibility();
+                hideControls.run();
+                Uri access = currentAccessUri == null ? null : Uri.parse(currentAccessUri);
+                String identity = currentDocumentUri;
+                if (identity != null && access != null) readingStore.reconnectDocument(identity, access.toString(), documentTitle(access));
+            }
+            @Override public void onDocumentError(Throwable error) {
+                controlsHandler.post(() -> {
+                    if (source != pdfViewerFragment || !showingDocument || isFinishing() || isDestroyed()) return;
+                    if (!transactionsReady || getSupportFragmentManager().isStateSaved()) {
+                        restoreOnResume = true;
+                        return;
+                    }
+                    String identity = currentDocumentUri;
+                    resetViewer();
+                    showHome();
+                    showOpenError(identity, error);
+                });
+            }
+            @Override public void onRendererError(Throwable error) { recoverRenderer(source, error); }
+            @Override public void onImmersiveModeRequested(boolean enterImmersive) { }
+        });
+    }
 
-                @Override
-                public void onImmersiveModeRequested(boolean enterImmersive) {
-                    // Corner tools stay reachable while reading.
-                }
-            });
+    private void recoverRenderer(PdfViewerFragmentExtended source, Throwable error) {
+        controlsHandler.post(() -> {
+            if (source != pdfViewerFragment || !showingDocument || isFinishing() || isDestroyed()) return;
+            if (!transactionsReady || getSupportFragmentManager().isStateSaved() || pickerInFlight || resolvingPicker) {
+                restoreOnResume = true;
+                return;
+            }
+            captureReadingPosition();
+            if (rendererRetries++ == 0 && currentAccessUri != null) {
+                Log.w(TAG, "Reopening disconnected PDF renderer", error);
+                openDocumentAttempt(Uri.parse(currentAccessUri), currentDocumentUri);
+            } else {
+                String identity = currentDocumentUri;
+                if (isSdkExtensionSupported()) resetViewer();
+                showHome();
+                showOpenError(identity, error);
+            }
+        });
+    }
+
+    @RequiresExtension(extension = Build.VERSION_CODES.S, version = 13)
+    private void resetViewer() {
+        if (loadWatchdog != null) controlsHandler.removeCallbacks(loadWatchdog);
+        // Never forget a fragment merely because a transaction cannot run yet.
+        if (getSupportFragmentManager().isStateSaved()) return;
+        androidx.fragment.app.Fragment active = pdfViewerFragment != null ? pdfViewerFragment
+                : getSupportFragmentManager().findFragmentByTag(PDF_VIEWER_FRAGMENT_TAG);
+        if (active instanceof PdfViewerFragmentExtended) {
+            ((PdfViewerFragmentExtended) active).setOnPdfEventListener(null);
+        }
+        if (active != null && active.isAdded()) {
+            try {
+                getSupportFragmentManager().beginTransaction().remove(active).commitNow();
+            } catch (RuntimeException error) {
+                // A native/service close failure must not recursively poison the next open.
+                Log.w(TAG, "Previous PDF cleanup failed", error);
+            }
+        }
+        pdfViewerFragment = null;
+        documentLoaded = false;
+    }
+
+    private void releaseRetiringViewer() {
+        if (retiringViewer != null && !getSupportFragmentManager().isStateSaved()) {
+            if (retiringViewer.isAdded()) getSupportFragmentManager().beginTransaction().remove(retiringViewer).commitNow();
+            retiringViewer = null;
         }
     }
 
     public String getCurrentDocumentUri() { return currentDocumentUri; }
 
     @Override protected void onSaveInstanceState(@NonNull Bundle state) {
+        captureReadingPosition();
+        state.putInt("reading_page", restorePage);
+        state.putFloat("reading_zoom", restoreZoom);
+        state.putBoolean("picker_in_flight", pickerInFlight);
+        state.putString("deferred_open_uri", deferredOpenUri == null ? null : deferredOpenUri.toString());
+        state.putString("deferred_open_identity", deferredOpenIdentity);
         state.putString("current_document_uri", currentDocumentUri);
+        state.putString("current_access_uri", currentAccessUri);
         state.putBoolean("showing_document", showingDocument);
+        state.putString("pending_reconnect_uri", pendingReconnectUri);
         super.onSaveInstanceState(state);
     }
 
-    private void openDocument(Uri uri) {
+    private void openDocument(Uri uri) { openDocument(uri, uri.toString()); }
+
+    void openDocument(Uri uri, String identity) {
+        rendererRetries = 0;
+        openDocumentAttempt(uri, identity);
+    }
+
+    private void openDocumentAttempt(Uri uri, String identity) {
+        openRequestId++;
         if (!isSdkExtensionSupported()) {
             Toast.makeText(this, "This device does not support the PDF viewer.", Toast.LENGTH_LONG).show();
             return;
         }
+        if (!transactionsReady || getSupportFragmentManager().isStateSaved()) {
+            deferredOpenUri = uri;
+            deferredOpenIdentity = identity;
+            return;
+        }
+        deferredOpenUri = null;
+        deferredOpenIdentity = null;
+        restoreOnResume = false;
         try {
-            // Confirm access before hiding the home screen. Some share URIs expire.
             try (android.content.res.AssetFileDescriptor file = getContentResolver().openAssetFileDescriptor(uri, "r")) {
                 if (file == null) throw new java.io.IOException("Document unavailable");
             }
             try { getContentResolver().takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION); }
-            catch (SecurityException ignored) { /* Temporary external grants may not persist. */ }
-            initializePdfViewerFragment();
-            currentDocumentUri = uri.toString();
+            catch (SecurityException ignored) { /* Recover expired grants through Locate PDF. */ }
+            // Never reuse a failed/previous renderer or its native document state.
+            if (identity == null || !identity.equals(currentDocumentUri)) { restorePage = 0; restoreZoom = 1f; }
+            // Bind the next document before releasing the previous document's service.
+            // Some devices terminate the isolated renderer between consecutive unbind/bind calls.
+            releaseRetiringViewer();
+            if (pdfViewerFragment != null && pdfViewerFragment.isAdded()) {
+                retiringViewer = pdfViewerFragment;
+                if (retiringViewer instanceof PdfViewerFragmentExtended)
+                    ((PdfViewerFragmentExtended) retiringViewer).setOnPdfEventListener(null);
+                pdfViewerFragment = null;
+            } else resetViewer();
+            currentDocumentUri = identity;
+            currentAccessUri = uri.toString();
             showingDocument = true;
-            pdfViewerFragment.setDocumentUri(uri);
-            String title = uri.getLastPathSegment();
-            try (Cursor cursor = getContentResolver().query(uri, new String[]{OpenableColumns.DISPLAY_NAME}, null, null, null)) {
-                if (cursor != null && cursor.moveToFirst()) title = cursor.getString(0);
-            } catch (RuntimeException ignored) { }
-            readingStore.recordDocument(currentDocumentUri, title == null ? "PDF document" : title);
+            documentLoaded = false;
+            actionsExpanded = false;
+            controlsHandler.removeCallbacks(hideControls);
+            pdfViewerFragment = createPdfViewerFragment();
+            attachPdfEventListener();
             updatePageVisibility();
+            final PdfViewerFragmentExtended opening = (PdfViewerFragmentExtended) pdfViewerFragment;
+            loadWatchdog = () -> {
+                if (opening == pdfViewerFragment && !documentLoaded && showingDocument)
+                    recoverRenderer(opening, new java.util.concurrent.TimeoutException("PDF loading did not complete"));
+            };
+            controlsHandler.postDelayed(loadWatchdog, 20000);
+            installViewer(opening, uri);
         } catch (Exception error) {
-            Toast.makeText(this, "Cannot reopen this PDF. Use Open to select it again.", Toast.LENGTH_LONG).show();
+            resetViewer();
+            showHome();
+            showOpenError(identity, error);
         }
     }
 
+    private String documentTitle(Uri uri) {
+        String title = uri.getLastPathSegment();
+        try (Cursor cursor = getContentResolver().query(uri, new String[]{OpenableColumns.DISPLAY_NAME}, null, null, null)) {
+            if (cursor != null && cursor.moveToFirst()) title = cursor.getString(0);
+        } catch (RuntimeException ignored) { }
+        return title == null ? "PDF document" : title;
+    }
+
+    private void showOpenError(String identity, Throwable error) {
+        Log.e(TAG, "PDF open failed", error);
+        if (isFinishing() || isDestroyed()) return;
+        new MaterialAlertDialogBuilder(this).setTitle("Couldn’t open this PDF")
+                .setMessage("Its saved location may no longer be accessible, or the file may not be a valid PDF. Locate the same PDF to reconnect this entry and keep its word history.")
+                .setNegativeButton("Cancel", null)
+                .setPositiveButton("Locate PDF", (dialog, which) -> {
+                    pendingReconnectUri = identity;
+                    launchPdfPicker();
+                }).show();
+    }
+
     private void showHome() {
+        openRequestId++;
+        deferredOpenUri = null; deferredOpenIdentity = null;
+        restoreOnResume = false;
+        resolvingPicker = false;
+        controlsHandler.removeCallbacks(hideControls);
         showingDocument = false;
+        actionsExpanded = false;
         updatePageVisibility();
         refreshRecentDocuments();
     }
+
     private void updatePageVisibility() {
         findViewById(R.id.home_content).setVisibility(showingDocument ? View.GONE : View.VISIBLE);
         findViewById(R.id.fragment_container_view).setVisibility(showingDocument ? View.VISIBLE : View.GONE);
-        if (searchButton != null) { searchButton.setEnabled(showingDocument); searchButton.setAlpha(showingDocument ? 1f : 0.4f); }
-        findViewById(R.id.home_button).setVisibility(showingDocument ? View.VISIBLE : View.GONE);
+        updateReaderWindow();
+        boolean actions = showingDocument && documentLoaded && actionsExpanded;
+        for (int id : new int[]{R.id.home_button, R.id.search_button, R.id.history_button, R.id.appearance_button}) {
+            findViewById(id).setVisibility(actions ? View.VISIBLE : View.GONE);
+        }
+        findViewById(R.id.reading_controls).setVisibility(!showingDocument || actions ? View.VISIBLE : View.GONE);
+        findViewById(R.id.more_button).setVisibility(View.GONE);
+        if (searchButton != null) searchButton.setEnabled(documentLoaded);
+    }
+
+    private void updateReaderWindow() {
+        androidx.core.view.WindowInsetsControllerCompat bars = WindowCompat.getInsetsController(getWindow(), getWindow().getDecorView());
+        bars.setAppearanceLightStatusBars(false);
+        bars.setAppearanceLightNavigationBars(false);
+        bars.setSystemBarsBehavior(androidx.core.view.WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
+        if (showingDocument) bars.hide(WindowInsetsCompat.Type.systemBars());
+        else bars.show(WindowInsetsCompat.Type.systemBars());
+        ViewCompat.requestApplyInsets(findViewById(R.id.pdf_container_view));
+    }
+
+    @Override public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        if (hasFocus && findViewById(R.id.pdf_container_view) != null) updateReaderWindow();
+    }
+
+    @Override public boolean dispatchTouchEvent(MotionEvent event) {
+        int action = event.getActionMasked();
+        if (action == MotionEvent.ACTION_DOWN) {
+            readerTap = showingDocument && documentLoaded
+                    && !isInside(findViewById(R.id.reading_controls), event)
+                    && !isInside(findViewById(R.id.more_button), event);
+            tapX = event.getX(); tapY = event.getY(); tapTime = event.getEventTime();
+        } else if (action == MotionEvent.ACTION_MOVE) {
+            int slop = android.view.ViewConfiguration.get(this).getScaledTouchSlop();
+            if (Math.abs(event.getX() - tapX) > slop || Math.abs(event.getY() - tapY) > slop) readerTap = false;
+        } else if (action == MotionEvent.ACTION_POINTER_DOWN || action == MotionEvent.ACTION_CANCEL) {
+            readerTap = false;
+        } else if (action == MotionEvent.ACTION_UP) {
+            if (readerTap && showingDocument && documentLoaded
+                    && event.getEventTime() - tapTime < android.view.ViewConfiguration.getLongPressTimeout()) {
+                boolean visible = actionsExpanded || findViewById(R.id.more_button).getVisibility() == View.VISIBLE;
+                hideControls.run();
+                if (!visible) findViewById(R.id.more_button).setVisibility(View.VISIBLE);
+            }
+            readerTap = false;
+        }
+        return super.dispatchTouchEvent(event);
+    }
+    private boolean isInside(View view, MotionEvent event) {
+        Rect rect = new Rect();
+        return view.getVisibility() == View.VISIBLE && view.getGlobalVisibleRect(rect)
+                && rect.contains((int) event.getRawX(), (int) event.getRawY());
+    }
+    @Override protected void onDestroy() {
+        controlsHandler.removeCallbacksAndMessages(null);
+        if (pdfSandbox != null) { pdfSandbox.close(); pdfSandbox = null; }
+        super.onDestroy();
     }
 
     private int dp(int value) { return Math.round(value * getResources().getDisplayMetrics().density); }
@@ -351,8 +661,14 @@ public class MainActivity extends AppCompatActivity {
             LinearLayout rows = findViewById(R.id.recent_documents); rows.removeAllViews();
             findViewById(R.id.recent_empty).setVisibility(documents.isEmpty() ? View.VISIBLE : View.GONE);
             for (ReadingStore.Document document : documents) {
-                MaterialCardView card = listCard(document.title, document.uri);
-                card.setOnClickListener(v -> openDocument(Uri.parse(document.uri))); rows.addView(card);
+                MaterialCardView card = listCard(document.title, null);
+                card.setOnClickListener(v -> {
+                    final int openRequest = ++openRequestId;
+                    readingStore.accessUri(document.uri, access -> {
+                        if (!isDestroyed() && !isFinishing() && openRequest == openRequestId)
+                            openDocument(Uri.parse(access), document.uri);
+                    });
+                }); rows.addView(card);
             }
         });
     }

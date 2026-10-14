@@ -29,20 +29,20 @@ public final class ReadingStore extends SQLiteOpenHelper {
     }
 
     ReadingStore(Context context, String name) {
-        super(context, name, null, 1);
+        super(context, name, null, 2);
         appContext = context.getApplicationContext();
     }
     private ReadingStore(Context context) { this(context, "reading.db"); }
 
     @Override public void onConfigure(SQLiteDatabase db) { db.setForeignKeyConstraintsEnabled(true); }
     @Override public void onCreate(SQLiteDatabase db) {
-        db.execSQL("CREATE TABLE documents (uri TEXT PRIMARY KEY, title TEXT NOT NULL, opened INTEGER NOT NULL)");
+        db.execSQL("CREATE TABLE documents (uri TEXT PRIMARY KEY, title TEXT NOT NULL, opened INTEGER NOT NULL, access_uri TEXT)");
         db.execSQL("CREATE TABLE words (document_uri TEXT NOT NULL, "
                 + "term_key TEXT NOT NULL, term TEXT NOT NULL, explanation TEXT, searched INTEGER NOT NULL, "
                 + "PRIMARY KEY(document_uri, term_key))");
     }
     @Override public void onUpgrade(SQLiteDatabase db, int oldVersion, int newVersion) {
-        throw new IllegalStateException("Unsupported database upgrade");
+        if (oldVersion < 2) db.execSQL("ALTER TABLE documents ADD COLUMN access_uri TEXT");
     }
 
     public boolean historyEnabled() {
@@ -74,6 +74,42 @@ public final class ReadingStore extends SQLiteOpenHelper {
     }
     public void recordDocument(String uri, String title) { write(() -> recordDocumentNow(uri, title)); }
 
+    // A relocated/reselected PDF keeps its original vocabulary identity.
+    public void reconnectDocument(String identity, String accessUri, String title) {
+        write(() -> reconnectDocumentNow(identity, accessUri, title));
+    }
+    void reconnectDocumentNow(String identity, String accessUri, String title) {
+        recordDocumentNow(identity, title);
+        ContentValues values = new ContentValues(); values.put("access_uri", accessUri);
+        getWritableDatabase().update("documents", values, "uri=?", new String[]{identity});
+    }
+    String identityForAccessUriNow(String accessUri) {
+        try (Cursor c = getReadableDatabase().rawQuery(
+                "SELECT uri FROM documents WHERE uri=? OR access_uri=? ORDER BY opened DESC LIMIT 1",
+                new String[]{accessUri, accessUri})) {
+            return c.moveToFirst() ? c.getString(0) : accessUri;
+        }
+    }
+    public void identityForAccessUri(String accessUri, Consumer<String> callback) {
+        worker.execute(() -> {
+            String identity;
+            try { identity = identityForAccessUriNow(accessUri); } catch (RuntimeException error) { identity = accessUri; }
+            String result = identity; main.post(() -> callback.accept(result));
+        });
+    }
+    String accessUriNow(String identity) {
+        try (Cursor c = getReadableDatabase().rawQuery("SELECT access_uri FROM documents WHERE uri=?", new String[]{identity})) {
+            return c.moveToFirst() && !c.isNull(0) ? c.getString(0) : identity;
+        }
+    }
+    public void accessUri(String identity, Consumer<String> callback) {
+        worker.execute(() -> {
+            String uri;
+            try { uri = accessUriNow(identity); } catch (RuntimeException error) { uri = identity; }
+            String result = uri; main.post(() -> callback.accept(result));
+        });
+    }
+
     void recordWordNow(String uri, String term, String explanation) {
         if (!historyEnabled() || uri == null || term.trim().isEmpty()) return;
         SQLiteDatabase db = getWritableDatabase();
@@ -97,8 +133,9 @@ public final class ReadingStore extends SQLiteOpenHelper {
     }
 
     public static final class Document {
-        public final String uri, title;
-        public Document(String uri, String title) { this.uri = uri; this.title = title; }
+        public final String uri, title, accessUri;
+        public Document(String uri, String title) { this(uri, title, uri); }
+        public Document(String uri, String title, String accessUri) { this.uri = uri; this.title = title; this.accessUri = accessUri; }
     }
     public static final class Word {
         public final String term, explanation;
@@ -106,8 +143,8 @@ public final class ReadingStore extends SQLiteOpenHelper {
     }
     List<Document> documentsNow() {
         List<Document> result = new ArrayList<>();
-        try (Cursor c = getReadableDatabase().rawQuery("SELECT uri,title FROM documents ORDER BY opened DESC,rowid DESC LIMIT 99", null)) {
-            while (c.moveToNext()) result.add(new Document(c.getString(0), c.getString(1)));
+        try (Cursor c = getReadableDatabase().rawQuery("SELECT uri,title,access_uri FROM documents ORDER BY opened DESC,rowid DESC LIMIT 99", null)) {
+            while (c.moveToNext()) result.add(new Document(c.getString(0), c.getString(1), c.isNull(2) ? c.getString(0) : c.getString(2)));
         }
         return result;
     }
